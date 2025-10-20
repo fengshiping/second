@@ -13,6 +13,38 @@ public class CommandLineArgs {
     private String exerciseFile;     // 题目文件路径
     private String answerFile;       // 答案文件路径
 
+    public int getCount() {
+        return count;
+    }
+
+    public void setCount(int count) {
+        this.count = count;
+    }
+
+    public int getRange() {
+        return range;
+    }
+
+    public void setRange(int range) {
+        this.range = range;
+    }
+
+    public String getExerciseFile() {
+        return exerciseFile;
+    }
+
+    public void setExerciseFile(String exerciseFile) {
+        this.exerciseFile = exerciseFile;
+    }
+
+    public String getAnswerFile() {
+        return answerFile;
+    }
+
+    public void setAnswerFile(String answerFile) {
+        this.answerFile = answerFile;
+    }
+
     /**
      * 判断是否为判分模式
      * @return 如果设置了题目文件或答案文件，则为判分模式
