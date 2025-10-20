@@ -6,6 +6,25 @@ public class ProblemGenerator {
     private final int range;
     private final Random random;
 
+    // 添加缓存机制
+    private final Map<String, CachedExpression> expressionCache = new HashMap<>();
+    private final Set<String> invalidExpressions = new HashSet<>();
+
+    // 缓存内部类
+    private static class CachedExpression {
+        final String infixString;
+        final String answer;
+        final String canonicalKey;
+        final int operatorCount;
+
+        CachedExpression(ExpressionNode expr) {
+            this.infixString = expr.toInfixString();
+            this.answer = expr.evaluate().toString();
+            this.canonicalKey = expr.getCanonicalKey();
+            this.operatorCount = expr.getOperatorCount();
+        }
+    }
+
     public ProblemGenerator(int range) {
         if (range <= 0) {
             throw new BusinessException(ErrorCode.INVALID_RANGE_PARAMETER.getCode(),
@@ -24,34 +43,17 @@ public class ProblemGenerator {
         Set<String> seenKeys = new HashSet<>();
         List<Problem> problems = new ArrayList<>();
         int attempts = 0;
-        int maxAttempts = count * 200; // 增加尝试次数
+        int maxAttempts = count * 100; // 减少尝试次数
 
         while (problems.size() < count && attempts < maxAttempts) {
             attempts++;
 
-            try {
-                ExpressionNode expression = generateExpression(1 + random.nextInt(3));
-                if (!validateExpression(expression)) {
-                    continue;
-                }
-
-                String key = expression.getCanonicalKey();
-                if (seenKeys.contains(key)) {
-                    continue;
-                }
-
-                seenKeys.add(key);
-                Fraction answer = expression.evaluate();
-                problems.add(new Problem(expression.toInfixString(), answer.toString()));
-
-            } catch (ArithmeticException e) {
-                // 忽略数学计算错误，继续生成
-                continue;
-            } catch (Exception e) {
-                // 其他异常记录并继续
-                System.err.println("生成表达式时发生错误: " + e.getMessage());
+            CachedExpression cached = generateValidCachedExpression();
+            if (cached == null || !seenKeys.add(cached.canonicalKey)) {
                 continue;
             }
+
+            problems.add(new Problem(cached.infixString, cached.answer));
         }
 
         if (problems.size() < count) {
@@ -63,6 +65,57 @@ public class ProblemGenerator {
         return problems;
     }
 
+    private CachedExpression generateValidCachedExpression() {
+        // 快速尝试3次
+        for (int quickAttempt = 0; quickAttempt < 3; quickAttempt++) {
+            ExpressionNode expression = generateOptimizedExpression(1 + random.nextInt(3));
+            String key = expression.getCanonicalKey();
+
+            // 检查已知无效表达式
+            if (invalidExpressions.contains(key)) {
+                continue;
+            }
+
+            // 检查缓存
+            CachedExpression cached = expressionCache.get(key);
+            if (cached != null) {
+                if (isValidCachedExpression(cached)) {
+                    return cached;
+                } else {
+                    invalidExpressions.add(key);
+                    continue;
+                }
+            }
+
+            // 新表达式，验证并缓存
+            try {
+                // 快速验证运算符数量
+                if (expression.getOperatorCount() > 3) {
+                    invalidExpressions.add(key);
+                    continue;
+                }
+
+                // 验证表达式有效性
+                Fraction result = expression.evaluate();
+                if (isValidFraction(result)) {
+                    CachedExpression newCached = new CachedExpression(expression);
+                    expressionCache.put(key, newCached);
+                    return newCached;
+                } else {
+                    invalidExpressions.add(key);
+                }
+            } catch (Exception e) {
+                invalidExpressions.add(key);
+            }
+        }
+        return null;
+    }
+
+    private ExpressionNode generateOptimizedExpression(int operatorCount) {
+        return generateExpression(operatorCount);
+    }
+
+    // 优化原有的 generateExpression 方法
     private ExpressionNode generateExpression(int operatorCount) {
         if (operatorCount == 0) {
             return new ExpressionNode(generateRandomFraction());
@@ -75,64 +128,90 @@ public class ProblemGenerator {
         ExpressionNode left = generateExpression(leftOps);
         ExpressionNode right = generateExpression(rightOps);
 
-        // 应用约束条件
-        return applyConstraints(op, left, right);
+        return applyOptimizedConstraints(op, left, right);
     }
 
-    private ExpressionNode applyConstraints(ExpressionNode.Operator op,
-                                            ExpressionNode left, ExpressionNode right) {
-        Fraction leftVal = left.evaluate();
-        Fraction rightVal = right.evaluate();
+    // 优化约束应用逻辑
+    private ExpressionNode applyOptimizedConstraints(ExpressionNode.Operator op,
+                                                     ExpressionNode left, ExpressionNode right) {
+        // 对于减法和除法，进行快速检查
+        if (op == ExpressionNode.Operator.SUBTRACT || op == ExpressionNode.Operator.DIVIDE) {
+            try {
+                Fraction leftVal = left.evaluate();
+                Fraction rightVal = right.evaluate();
 
-        switch (op) {
-            case SUBTRACT:
-                // 确保左值 >= 右值
-                if (leftVal.compareTo(rightVal) < 0) {
-                    return new ExpressionNode(op, right, left);
-                }
-                break;
+                switch (op) {
+                    case SUBTRACT:
+                        if (leftVal.compareTo(rightVal) < 0) {
+                            return new ExpressionNode(op, right, left);
+                        }
+                        break;
 
-            case DIVIDE:
-                // 确保右值非零且结果为真分数
-                if (rightVal.isZero()) {
-                    right = generateExpression(right.getOperatorCount());
-                    rightVal = right.evaluate();
+                    case DIVIDE:
+                        if (rightVal.isZero()) {
+                            // 重新生成右节点，但限制次数
+                            right = generateSimpleExpression();
+                        }
+                        // 检查除法结果是否为真分数
+                        Fraction divisionResult = leftVal.divide(rightVal);
+                        if (!divisionResult.isProper() && leftVal.compareTo(rightVal) >= 0) {
+                            return new ExpressionNode(op, right, left);
+                        }
+                        break;
                 }
-                Fraction result = leftVal.divide(rightVal);
-                if (!result.isProper()) {
-                    // 调整使得结果为真分数
-                    if (leftVal.compareTo(rightVal) >= 0) {
-                        ExpressionNode temp = left;
-                        left = right;
-                        right = temp;
-                    }
-                }
-                break;
+            } catch (Exception e) {
+                // 如果计算出错，交换节点重试
+                return new ExpressionNode(op, right, left);
+            }
         }
 
         return new ExpressionNode(op, left, right);
     }
 
-    private boolean validateExpression(ExpressionNode expr) {
-        try {
-            Fraction result = expr.evaluate();
-            // 检查运算符数量
-            if (expr.getOperatorCount() > 3) {
-                return false;
+    // 生成简单表达式（避免深度递归）
+    private ExpressionNode generateSimpleExpression() {
+        if (random.nextDouble() < 0.5) {
+            return new ExpressionNode(generateRandomFraction());
+        } else {
+            ExpressionNode.Operator op = randomOperator();
+            // 避免除法和减法以减少复杂度
+            while (op == ExpressionNode.Operator.DIVIDE || op == ExpressionNode.Operator.SUBTRACT) {
+                op = randomOperator();
             }
-            return true;
+            return new ExpressionNode(op,
+                    new ExpressionNode(generateRandomFraction()),
+                    new ExpressionNode(generateRandomFraction()));
+        }
+    }
+
+    private boolean isValidCachedExpression(CachedExpression cached) {
+        return cached.operatorCount <= 3;
+    }
+
+    private boolean isValidFraction(Fraction fraction) {
+        try {
+            return fraction.compareTo(new Fraction(0)) >= 0; // 非负数
         } catch (Exception e) {
             return false;
         }
     }
 
+    // 保留原有验证方法（用于兼容性）
+    private boolean validateExpression(ExpressionNode expr) {
+        try {
+            Fraction result = expr.evaluate();
+            return expr.getOperatorCount() <= 3;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // 优化分数生成
     private Fraction generateRandomFraction() {
-        // 生成分数：整数或真分数
-        if (random.nextDouble() < 0.7) {
-            // 生成整数
+        // 增加整数比例，减少分数运算
+        if (random.nextDouble() < 0.8) { // 从0.7提高到0.8
             return new Fraction(random.nextInt(range - 1) + 1);
         } else {
-            // 生成真分数
             int denominator = random.nextInt(range - 2) + 2;
             int numerator = random.nextInt(denominator - 1) + 1;
             return new Fraction(numerator, denominator);
@@ -141,6 +220,17 @@ public class ProblemGenerator {
 
     private ExpressionNode.Operator randomOperator() {
         ExpressionNode.Operator[] operators = ExpressionNode.Operator.values();
+        // 调整运算符概率，减少除法和减法
+        if (random.nextDouble() < 0.3) {
+            // 30% 概率选择加法或乘法
+            return random.nextBoolean() ? ExpressionNode.Operator.ADD : ExpressionNode.Operator.MULTIPLY;
+        }
         return operators[random.nextInt(operators.length)];
+    }
+
+    // 添加清理方法（可选）
+    public void clearCache() {
+        expressionCache.clear();
+        invalidExpressions.clear();
     }
 }
